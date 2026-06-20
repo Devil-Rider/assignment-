@@ -1,4 +1,8 @@
 
+> 🐘 **Looking for the SQLQuest website?** A free, gamified SQL learning platform
+> with an in-browser SQL editor lives in [`/web`](./web). See [`web/README.md`](./web/README.md)
+> to run or deploy it.
+
 # Quick-Commerce Data Engineering Pipeline
 
 This project implements a small-scale data pipeline that ingests raw operational data from CSV files, lands them in an Amazon Redshift cluster as staging tables, and transforms them into a clean dimensional model for business intelligence.

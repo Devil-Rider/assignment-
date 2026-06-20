@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SQLQuest — Learn SQL by Playing</title>
+  <meta name="description" content="SQLQuest is a free, gamified SQL learning platform with an in-browser SQL editor. Run SQL right in your browser and master SQL from beginner to advanced." />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐘</text></svg>" />
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+  <!-- CodeMirror (optional enhancement; app works without it) -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/dracula.min.css" />
+
+  <link rel="stylesheet" href="css/styles.css" />
+
+  <!-- ============================================================
+       GOOGLE ADSENSE  (replace ca-pub-XXXX with your publisher id)
+       This is how you earn. Sign up at https://adsense.google.com,
+       paste your publisher ID below and into js/ads.js.
+       ============================================================ -->
+  <!--
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-XXXXXXXXXXXXXXXX"
+          crossorigin="anonymous"></script>
+  -->
+</head>
+<body>
+  <!-- Top navigation -->
+  <header class="navbar">
+    <a href="#/home" class="brand">
+      <span class="brand-logo">🐘</span>
+      <span class="brand-name">SQL<span class="accent">Quest</span></span>
+    </a>
+
+    <nav class="nav-links" id="navLinks">
+      <a href="#/home" data-route="home">Home</a>
+      <a href="#/editor" data-route="editor">SQL Editor</a>
+      <a href="#/learn" data-route="learn">Learn</a>
+      <a href="#/contact" data-route="contact">Contact</a>
+    </nav>
+
+    <div class="nav-right" id="navRight">
+      <!-- auth area injected by auth.js -->
+    </div>
+
+    <button class="hamburger" id="hamburger" aria-label="Menu">☰</button>
+  </header>
+
+  <!-- Leaderboard / top ad slot -->
+  <div class="ad-slot ad-leaderboard" data-ad="top"></div>
+
+  <!-- Main routed view -->
+  <main id="view" class="view"></main>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="footer-inner">
+      <div>
+        <div class="brand" style="margin-bottom:.5rem">
+          <span class="brand-logo">🐘</span>
+          <span class="brand-name">SQL<span class="accent">Quest</span></span>
+        </div>
+        <p class="muted">Learn SQL by playing. Runs 100% in your browser.</p>
+      </div>
+      <div class="footer-links">
+        <a href="#/editor">SQL Editor</a>
+        <a href="#/learn">Learn</a>
+        <a href="#/contact">Contact</a>
+      </div>
+      <div class="muted small">© <span id="year"></span> SQLQuest. All rights reserved.</div>
+    </div>
+  </footer>
+
+  <!-- sql.js (SQLite compiled to WebAssembly) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/sql-wasm.min.js"></script>
+
+  <!-- CodeMirror -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/sql/sql.min.js"></script>
+
+  <!-- App scripts -->
+  <script src="js/ads.js"></script>
+  <script src="js/sql-engine.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/course-data.js"></script>
+  <script src="js/components.js"></script>
+  <script src="js/pages/home.js"></script>
+  <script src="js/pages/editor.js"></script>
+  <script src="js/pages/learn.js"></script>
+  <script src="js/pages/contact.js"></script>
+  <script src="js/pages/login.js"></script>
+  <script src="js/router.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

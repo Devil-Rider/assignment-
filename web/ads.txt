@@ -1,0 +1,4 @@
+# Google AdSense authorized sellers file.
+# Replace pub-XXXXXXXXXXXXXXXX with your own AdSense publisher ID, then
+# serve this file at the ROOT of your domain (https://yourdomain/ads.txt).
+google.com, pub-XXXXXXXXXXXXXXXX, DIRECT, f08c47fec0942fa0
