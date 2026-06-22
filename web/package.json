@@ -1,0 +1,11 @@
+{
+  "name": "sqlquest",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SQLQuest — a free, gamified SQL learning platform with an in-browser SQL editor.",
+  "scripts": {
+    "start": "npx --yes serve .",
+    "serve": "python3 -m http.server 8000",
+    "test": "node test/run-solutions.mjs"
+  }
+}
