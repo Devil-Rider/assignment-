@@ -11,9 +11,14 @@ deploy it as static files anywhere and monetize it with ads.
 |------|--------------|-----------------|
 | **SQL Editor** (`#/editor`) | Write and run real SQL against a sample shop database, right in the browser. Schema sidebar, Run (Ctrl/⌘+Enter), reset DB. | ❌ Open to everyone |
 | **Learn** (`#/learn`) | A gamified course from beginner → advanced. 6 "worlds", 25 auto-graded challenges, XP, levels, badges, and locked/unlocked progression. | ✅ Yes |
+| **Leaderboard** (`#/leaderboard`) | Ranks all players by XP, level, lessons completed & badges. | ❌ |
 | **Contact** (`#/contact`) | Contact-us page with details and a message form. | ❌ |
 | **Login / Sign up** (`#/login`) | Client-side accounts that store your XP & progress. | — |
 | **Ads** | Dedicated, AdSense-ready ad slots throughout the site. **This is the revenue source.** | — |
+
+**Extras:** 🌙/☀️ **dark/light theme toggle** (remembers your choice) and a
+🔗 **Share** button in the editor that copies a link which reopens your exact
+query (`#/editor?q=…`) — great for sharing snippets or asking for help.
 
 ## 🧠 The Course (beginner → advanced)
 

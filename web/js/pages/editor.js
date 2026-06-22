@@ -2,7 +2,19 @@
    editor.js — public SQL Editor (no login required)
    ============================================================ */
 window.Pages = window.Pages || {};
-window.Pages.editor = function (view) {
+
+// URL-safe base64 so SQL survives inside a hash query param
+function encodeSql(sql) {
+  return btoa(unescape(encodeURIComponent(sql))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function decodeSql(s) {
+  try {
+    s = s.replace(/-/g, '+').replace(/_/g, '/');
+    return decodeURIComponent(escape(atob(s)));
+  } catch { return null; }
+}
+
+window.Pages.editor = function (view, params) {
   view.innerHTML = `
     <div class="row-between" style="margin-bottom:1rem">
       <div>
@@ -29,6 +41,7 @@ window.Pages.editor = function (view) {
           <button class="btn btn-green" id="runBtn">▶ Run <span class="muted small">(Ctrl/⌘+Enter)</span></button>
           <button class="btn btn-sm" id="resetDbBtn" title="Restore the sample data">↺ Reset DB</button>
           <button class="btn btn-sm" id="clearBtn">Clear</button>
+          <button class="btn btn-sm" id="shareBtn" title="Copy a link that reopens this query">🔗 Share</button>
           <span class="spacer"></span>
           <span class="muted small" id="engineStatus">Loading SQL engine…</span>
         </div>
@@ -50,8 +63,9 @@ window.Pages.editor = function (view) {
       }).join('')}</ul>
     </div>`).join('');
 
-  // Mount editor
-  const editor = window.Components.codeEditor(view.querySelector('#cmHost'), 'SELECT * FROM products;');
+  // Mount editor — preload a shared query if ?q= is present
+  const shared = params && params.query && params.query.q ? decodeSql(params.query.q) : null;
+  const editor = window.Components.codeEditor(view.querySelector('#cmHost'), shared || 'SELECT * FROM products;');
   const resultHost = view.querySelector('#resultHost');
   const status = view.querySelector('#engineStatus');
 
@@ -95,6 +109,18 @@ window.Pages.editor = function (view) {
     await window.SQLEngine.init();
     window.SQLEngine.reset();
     window.Components.toast('Database reset to sample data', 'success');
+  };
+  view.querySelector('#shareBtn').onclick = async () => {
+    const sql = editor.getValue().trim();
+    if (!sql) { window.Components.toast('Write a query to share first', 'err'); return; }
+    const url = `${location.origin}${location.pathname}#/editor?q=${encodeSql(sql)}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      window.Components.toast('🔗 Share link copied to clipboard!', 'success');
+    } catch {
+      // Clipboard blocked (e.g. file://) — show the link to copy manually
+      window.prompt('Copy this share link:', url);
+    }
   };
 
   // Keyboard shortcut — bound to a page-local node so it's discarded on route change

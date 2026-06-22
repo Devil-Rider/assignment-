@@ -39,6 +39,24 @@ window.Auth = (function () {
 
   function isLoggedIn() { return !!currentUser(); }
 
+  // All accounts on this device, ranked for the leaderboard.
+  function listPlayers() {
+    const users = getUsers();
+    const me = currentEmail();
+    return Object.keys(users).map((email) => {
+      const u = users[email];
+      const completed = u.completed || {};
+      const lessons = Object.keys(completed).filter((k) => window.COURSE_INDEX && window.COURSE_INDEX.byId[k]).length;
+      return {
+        email, name: u.name, xp: u.xp || 0,
+        badges: (u.badges || []).length,
+        lessons,
+        level: levelInfo(u.xp || 0).level,
+        isMe: email === me,
+      };
+    }).sort((a, b) => b.xp - a.xp || b.lessons - a.lessons || a.name.localeCompare(b.name));
+  }
+
   function signup(name, email, password) {
     email = (email || '').trim().toLowerCase();
     if (!name || !name.trim()) return { ok: false, error: 'Please enter your name.' };

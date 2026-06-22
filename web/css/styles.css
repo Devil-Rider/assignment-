@@ -86,7 +86,7 @@ code { font-family: 'JetBrains Mono', monospace; background: var(--panel-2); pad
 .hero h1 .grad { background: linear-gradient(135deg,var(--accent),var(--accent-2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .hero p.lead { font-size: 1.15rem; color: var(--muted); margin: 0 0 1.5rem; max-width: 38ch; }
 .hero-cta { display: flex; gap: .75rem; flex-wrap: wrap; }
-.hero-card { background: var(--bg-soft); border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem; box-shadow: var(--shadow); font-family: 'JetBrains Mono', monospace; font-size: .85rem; }
+.hero-card { background: #1c2030; border: 1px solid #2c3350; border-radius: var(--radius); padding: 1rem; box-shadow: var(--shadow); font-family: 'JetBrains Mono', monospace; font-size: .85rem; color: #e6e9f2; }
 .hero-card .cm-line { white-space: pre; }
 .kw { color: #ff79c6; } .fn { color: #8be9fd; } .str { color: #f1fa8c; } .num { color: #bd93f9; }
 
@@ -202,6 +202,26 @@ textarea.ta { width: 100%; min-height: 120px; padding: .65rem .8rem; border-radi
 .tag-row { display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .5rem; }
 .chip { font-size: .72rem; background: var(--panel-2); border: 1px solid var(--border); padding: .2rem .55rem; border-radius: 999px; color: var(--muted); }
 .hidden { display: none !important; }
+
+/* ---------- Theme toggle ---------- */
+.theme-toggle { font-size: 1.05rem; line-height: 1; padding: .45rem .6rem; margin-left: auto; }
+
+/* ---------- Light theme ---------- */
+body.light {
+  --bg: #f4f6fb;
+  --bg-soft: #ffffff;
+  --panel: #ffffff;
+  --panel-2: #eef1f8;
+  --border: #dde3f0;
+  --text: #1a2032;
+  --muted: #5c6680;
+  --shadow: 0 10px 30px rgba(20,30,60,.08);
+}
+body.light { background: radial-gradient(1200px 600px at 80% -10%, #e7ecfb 0%, var(--bg) 55%); }
+body.light .navbar { background: rgba(255,255,255,.85); }
+body.light .ad-slot { background: repeating-linear-gradient(45deg,#eef1f8,#eef1f8 10px,#e6eaf4 10px,#e6eaf4 20px); }
+/* Code surfaces stay dark in both themes for readability */
+body.light .CodeMirror, body.light textarea.code-fallback { color: #f8f8f2; }
 
 /* ---------- Responsive ---------- */
 @media (max-width: 900px) {

@@ -9,6 +9,7 @@ window.Router = (function () {
     home: (params) => window.Pages.home(view(), params),
     editor: (params) => window.Pages.editor(view(), params),
     learn: (params) => window.Pages.learn(view(), params),
+    leaderboard: (params) => window.Pages.leaderboard(view(), params),
     contact: (params) => window.Pages.contact(view(), params),
     login: (params) => window.Pages.login(view(), params),
   };
