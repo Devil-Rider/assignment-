@@ -1,373 +1,282 @@
 """
 =======================================================================================
-TO Network Allocation -- greedy, ONE MH per store x sku, with fallback   (PySpark + pandas)
+TO Network Allocation -- distributed tier-by-tier greedy (PySpark)
 =======================================================================================
-Output table grain / primary key : (store_id, product_variant_id)
-  -> exactly one row per store x sku, and exactly one chosen MH (final_mh_id).
+Reads ONE pre-built candidate "network" table (built in SQL, shared by the caller) and
+runs the greedy MH allocation as an iterative loop, entirely in Spark so it scales to
+~20M+ lines.
 
-Greedy rules (confirmed):
-  * Priority order of supply (highest first):
-        tier 1 : expiry_in_30days  + DEAD   MH
-        tier 2 : expiry_in_30days  + BUYING MH
-        tier 3 : expiry_post_30days + DEAD   MH
-        tier 4 : expiry_post_30days + BUYING MH
-    (a "dead" MH = an MH that is NOT actively bought for that sku;
-     a "buying" MH = closed PO on a live store, from po_base_table.)
-  * Processed GLOBALLY tier by tier: all tier-1 demand is served before any tier-2, etc.
-  * One MH per store x sku WITH FALLBACK: a store takes ALL its qty from a single MH.
-    If its preferred MH cannot fully serve it (drained by other stores), the store
-    "falls through" to its next candidate MH (LH secondary/tertiary/quaternary) / next
-    tier until one MH can fully serve it.  (e.g. one shared MH covers 30 stores' full
-    requirement -> those 30 are done; the other 70 fall through to their next MH.)
-  * Contention: when a shared MH cannot serve everyone, the stores with the LARGEST
-    requirement win the inventory first.
-  * Stores that no single MH can fully serve fall to a final "best partial" pass
-    (assigned to the candidate MH with the most remaining inventory) and report unmet qty.
+INPUT  (key = store_id x sku x mh_id x inv_bucket), columns:
+    store_id, sku, mh_id, inv_bucket,
+    dead_mh                  (1 = dead MH, 0 = buying MH),
+    frequency                (1 = MH planned for the store tomorrow, 0 = not),
+    inv                      (inventory of mh x sku in this bucket; repeats across stores),
+    po_base_validation_status('closed' / 'open'),
+    ds_requirement           (store x sku demand; repeats across the store's mh lines),
+    final_ros                (carried for RCA).
 
-Every column used in the decision is written to the output row so the table is
-self-contained for RCA.
+GREEDY RULES (confirmed):
+  * Hard filter: only frequency = 1 lines are eligible; po 'open' lines are skipped.
+  * Tier order (outer loop):
+        tier 1 : dead_mh = 1 & inv_bucket = expiry_in_30days
+        tier 2 : dead_mh = 0 & inv_bucket = expiry_in_30days
+        tier 3 : dead_mh = 1 & inv_bucket = expiry_post_30days
+        tier 4 : dead_mh = 0 & inv_bucket = expiry_post_30days
+  * Inner rounds within a tier:
+      - each open store x sku picks its HIGHEST-inventory candidate MH (one per store),
+      - within each MH the competing stores are stacked by ds_requirement DESC and the
+        cumulative requirement is gated against the MH inventory:
+            cum_req <= mh_inv  -> allocate the store's ENTIRE requirement, else 0
+        (all-or-nothing; no partials),
+      - inventory pool is reduced, fully-allocated stores are closed (final_mh_id set),
+      - every tested line is marked "used" so unserved stores fall through to their next
+        MH next round; repeat until the tier has no working set, then go to the next tier.
 
-NOTE on scope of "one MH": a store draws from a single (mh, expiry_bucket) slot.
-Combining both buckets of the SAME MH to complete a requirement is a deliberate
-future refinement (kept out for v1 clarity).
-
-NOTE on performance: the greedy is O(n log n) per sku (single pass per tier) and the
-problem decomposes by sku.  The candidate edges are pulled to the driver via pandas;
-if the edge set is very large, batch the sku groups (see allocate_all).
+OUTPUTS:
+  * line-level   (store x sku x mh x inv_bucket) : allocation_round, allocated_qty,
+                   total_allocated (mh x sku x bucket), inv_remaining, eligible, ...
+  * store x sku final : final_mh_id, allocated_qty, balance_requirement, reason, ...
 =======================================================================================
 """
 
 from datetime import date
 
-import pandas as pd
+from pyspark.sql import functions as F
+from pyspark.sql import Window
+
+# ---- configuration -------------------------------------------------------------------
+INPUT_TABLE = "gold.scratch.to_network_base"              # <== user-built network table
+OUT_LINE_TABLE = "gold.scratch.to_network_base_allocated"  # line-level result
+OUT_FINAL_TABLE = "gold.scratch.to_network_allocation"     # store x sku final result
+
+BUCKET_IN30 = "expiry_in_30days"
+BUCKET_POST30 = "expiry_post_30days"
+
+# (tier_no, dead_mh value, inv_bucket)  -- processed in this order.
+TIERS = [
+    (1, 1, BUCKET_IN30),
+    (2, 0, BUCKET_IN30),
+    (3, 1, BUCKET_POST30),
+    (4, 0, BUCKET_POST30),
+]
+
+MAX_ROUNDS = 200      # global safety guard against runaway loops
 
 
 # ---------------------------------------------------------------------------------------
-# Shared CTEs -- build the inputs exactly once, reused by both the EDGES and BASE queries.
-# Swap the ds_requirement CTE for your real DS_requirement source (alias demand as
-# `requirement`, grain store_id x product_variant_id).
-# ---------------------------------------------------------------------------------------
-WITH_CLAUSE = """
-WITH
-inv_by_bucket AS (
-    SELECT
-        store_id                                                   AS mh_id,
-        sku                                                        AS product_variant_id,
-        CASE WHEN datediff(picking_date, current_date()) <= 30
-             THEN 'in_30' ELSE 'post_30' END                       AS expiry_bucket,
-        sum(available_qty)                                         AS mh_inventory_qty
-    FROM gold.ops.expiry_raw_data_summary
-    WHERE lower(inv_bucket) IN ('good', 'deep')
-      AND upper(store_type) = 'WAREHOUSE'
-      AND available_qty IS NOT NULL
-    GROUP BY store_id, sku,
-             CASE WHEN datediff(picking_date, current_date()) <= 30 THEN 'in_30' ELSE 'post_30' END
-    HAVING sum(available_qty) > 0
-),
-to_base AS (
-    SELECT DISTINCT store_id, product_variant_id
-    FROM gold.planning.to_base_table
-),
-po_status AS (
-    SELECT
-        store_id,
-        product_variant_id,
-        count(*)                                                              AS po_row_cnt,
-        max(CASE WHEN lower(validation_status) = 'open'   THEN 1 ELSE 0 END)  AS has_open,
-        max(CASE WHEN lower(validation_status) = 'closed' THEN 1 ELSE 0 END)  AS has_closed
-    FROM gold.planning.po_base_table
-    GROUP BY store_id, product_variant_id
-),
-buying_set AS (
-    SELECT DISTINCT mh_id, product_variant_id
-    FROM gold.planning.po_base_table
-    WHERE lower(validation_status) = 'closed'
-      AND lower(store_phase)       = 'live'
-      AND mh_id IS NOT NULL
-),
-cand_a AS (
-    SELECT store_id, product_variant_id, mh_pref_rank, mh_id, 'final_sec_mh_selection' AS mh_source
-    FROM (
-        SELECT store_id, product_variant_id,
-               stack(4, 1, to_primary_mh, 2, to_secondary_mh,
-                        3, to_tertiary_mh, 4, to_quaternary_mh) AS (mh_pref_rank, mh_id)
-        FROM gold.scratch.final_sec_mh_selection
-    ) s
-    WHERE nullif(trim(mh_id), '') IS NOT NULL
-),
-cand_a_keys AS (
-    SELECT DISTINCT store_id, product_variant_id FROM cand_a
-),
-store_master_mh AS (
-    SELECT DISTINCT store_id, mh_id
-    FROM (
-        SELECT store_id,
-               stack(4, to_primary_mh, to_secondary_mh,
-                        to_tertiary_mh, to_quaternary_mh) AS (mh_id)
-        FROM gold.ops.store_master_live
-    ) u
-    WHERE nullif(trim(mh_id), '') IS NOT NULL
-),
-cand_b AS (
-    SELECT b.store_id, b.product_variant_id,
-           CAST(99 AS INT) AS mh_pref_rank, m.mh_id, 'store_master_live' AS mh_source
-    FROM to_base b
-    LEFT ANTI JOIN cand_a_keys k
-        ON b.store_id = k.store_id AND b.product_variant_id = k.product_variant_id
-    JOIN store_master_mh m ON b.store_id = m.store_id
-),
-candidate_mh AS (
-    SELECT store_id, product_variant_id, mh_id,
-           min(mh_pref_rank)               AS mh_pref_rank,
-           min_by(mh_source, mh_pref_rank) AS mh_source
-    FROM (
-        SELECT store_id, product_variant_id, mh_id, mh_pref_rank, mh_source FROM cand_a
-        UNION ALL
-        SELECT store_id, product_variant_id, mh_id, mh_pref_rank, mh_source FROM cand_b
-    ) c
-    WHERE nullif(trim(mh_id), '') IS NOT NULL
-    GROUP BY store_id, product_variant_id, mh_id
-),
-ds_requirement AS (
-    SELECT store_id, product_variant_id, requirement
-    FROM gold.scratch.ds_requirement   -- <== TODO: replace with real DS_requirement source
-)
-"""
-
-# Candidate edges = eligible store x sku  x  candidate MH (that has inventory)  x  bucket.
-QUERY_EDGES = WITH_CLAUSE + """
-SELECT
-    b.store_id,
-    b.product_variant_id,
-    cm.mh_id,
-    cm.mh_source,
-    cm.mh_pref_rank,
-    CASE WHEN bs.mh_id IS NOT NULL THEN 'buying' ELSE 'dead' END AS mh_type,
-    iv.expiry_bucket,
-    iv.mh_inventory_qty,
-    r.requirement,
-    CASE
-        WHEN iv.expiry_bucket = 'in_30'   AND bs.mh_id IS NULL     THEN 1
-        WHEN iv.expiry_bucket = 'in_30'   AND bs.mh_id IS NOT NULL THEN 2
-        WHEN iv.expiry_bucket = 'post_30' AND bs.mh_id IS NULL     THEN 3
-        WHEN iv.expiry_bucket = 'post_30' AND bs.mh_id IS NOT NULL THEN 4
-    END AS priority_tier
-FROM to_base b
-JOIN po_status      ps ON b.store_id = ps.store_id AND b.product_variant_id = ps.product_variant_id
-JOIN candidate_mh   cm ON b.store_id = cm.store_id AND b.product_variant_id = cm.product_variant_id
-JOIN inv_by_bucket  iv ON cm.mh_id  = iv.mh_id     AND cm.product_variant_id = iv.product_variant_id
-JOIN ds_requirement r  ON b.store_id = r.store_id  AND b.product_variant_id = r.product_variant_id
-LEFT JOIN buying_set bs ON cm.mh_id = bs.mh_id     AND cm.product_variant_id = bs.product_variant_id
-WHERE coalesce(ps.has_open, 0) = 0
-  AND coalesce(r.requirement, 0) > 0
-"""
-
-# Base = every store x sku (so ineligible / no-candidate / no-requirement rows still appear).
-QUERY_BASE = WITH_CLAUSE + """
-SELECT
-    b.store_id,
-    b.product_variant_id,
-    rq.requirement,
-    coalesce(ps.po_row_cnt, 0)                                  AS po_row_cnt,
-    coalesce(ps.has_open,   0)                                  AS has_open_po,
-    coalesce(ps.has_closed, 0)                                  AS has_closed_po,
-    CASE WHEN coalesce(ps.has_open, 0) = 1 THEN 'OPEN'
-         WHEN coalesce(ps.has_closed, 0) = 1 THEN 'CLOSED'
-         WHEN ps.po_row_cnt IS NULL THEN 'NO_PO_ROW'
-         ELSE 'OTHER' END                                       AS base_validation_status,
-    CASE WHEN coalesce(ps.has_open, 0) = 1 THEN 0 ELSE 1 END    AS eligible
-FROM to_base b
-LEFT JOIN po_status      ps ON b.store_id = ps.store_id AND b.product_variant_id = ps.product_variant_id
-LEFT JOIN ds_requirement rq ON b.store_id = rq.store_id AND b.product_variant_id = rq.product_variant_id
-"""
-
-OUTPUT_TABLE = "gold.scratch.to_network_allocation"
-TIERS = (1, 2, 3, 4)
+def _standardize(df):
+    """Select + cast the contract columns, defensively."""
+    return df.select(
+        F.col("store_id").cast("string").alias("store_id"),
+        F.col("sku").cast("string").alias("sku"),
+        F.col("mh_id").cast("string").alias("mh_id"),
+        F.col("inv_bucket").cast("string").alias("inv_bucket"),
+        F.col("dead_mh").cast("int").alias("dead_mh"),
+        F.col("frequency").cast("int").alias("frequency"),
+        F.col("inv").cast("double").alias("inv"),
+        F.col("po_base_validation_status").cast("string").alias("po_base_validation_status"),
+        F.col("ds_requirement").cast("double").alias("ds_requirement"),
+        F.col("final_ros").cast("double").alias("final_ros"),
+    )
 
 
-# ---------------------------------------------------------------------------------------
-# Greedy allocation for a SINGLE sku.
-# ---------------------------------------------------------------------------------------
-def allocate_one_sku(sku, edges):
+def allocate(lines):
     """
-    edges : DataFrame of candidate edges for one sku, columns:
-        store_id, mh_id, mh_source, mh_pref_rank, mh_type, expiry_bucket,
-        mh_inventory_qty, requirement, priority_tier
-    Returns list of dict, one per store in this sku that had at least one candidate edge.
+    Core greedy. `lines` is the standardized network DataFrame.
+    Returns (line_out, final_out) DataFrames. No table reads/writes here (testable).
     """
-    # Inventory pools per (mh, bucket) -- the shared, decremented resource.
-    pools, pool_init = {}, {}
-    for (mh, bkt), sub in edges.groupby(["mh_id", "expiry_bucket"]):
-        qty = float(sub["mh_inventory_qty"].iloc[0])
-        pools[(mh, bkt)] = qty
-        pool_init[(mh, bkt)] = qty
+    lines = lines.localCheckpoint()
 
-    # Per-store: requirement + candidate slots grouped by tier.
-    requirement = edges.groupby("store_id")["requirement"].first().astype(float).to_dict()
-    remaining = dict(requirement)
-    assigned = {}                       # store -> dict(mh, bucket, tier, alloc, lh_rank, mh_type, mh_source)
+    po_ok = (F.col("po_base_validation_status").isNull()
+             | (F.lower("po_base_validation_status") != F.lit("open")))
 
-    slots_by_tier = {t: {} for t in TIERS}     # tier -> store -> list of slot dicts
-    for row in edges.itertuples(index=False):
-        slot = dict(mh=row.mh_id, bucket=row.expiry_bucket, lh_rank=int(row.mh_pref_rank),
-                    mh_type=row.mh_type, mh_source=row.mh_source)
-        slots_by_tier[int(row.priority_tier)].setdefault(row.store_id, []).append(slot)
+    # Eligible lines that can actually receive allocation.
+    eligible_lines = lines.filter((F.col("frequency") == 1) & po_ok).localCheckpoint()
 
-    # ---- Pass A: tier by tier, FULL-service only, largest requirement first. -----------
-    # Pools only shrink within a tier, so a single largest-first pass per tier is correct.
-    for tier in TIERS:
-        eligible = [s for s in slots_by_tier[tier]
-                    if s not in assigned and remaining[s] > 0]
-        eligible.sort(key=lambda s: (-remaining[s], s))          # largest requirement first
-        for s in eligible:
-            need = remaining[s]
-            # candidate slots in this tier that can FULLY serve `need`, best by (lh_rank, pool desc)
-            opts = [sl for sl in slots_by_tier[tier][s] if pools.get((sl["mh"], sl["bucket"]), 0) >= need]
-            if not opts:
-                continue                                          # fall through to next tier
-            opts.sort(key=lambda sl: (sl["lh_rank"], -pools[(sl["mh"], sl["bucket"])]))
-            sl = opts[0]
-            pools[(sl["mh"], sl["bucket"])] -= need
-            remaining[s] = 0.0
-            assigned[s] = dict(sl, tier=tier, alloc=need)
+    # ---- initial state DataFrames ----------------------------------------------------
+    # pool: shared inventory per (mh, sku, bucket)
+    pool_state = (lines.groupBy("mh_id", "sku", "inv_bucket")
+                  .agg(F.max("inv").alias("inv_balance"))
+                  .localCheckpoint())
 
-    # ---- Pass B: best-partial cleanup for stores no single MH could fully serve. --------
-    all_slots = {}                       # store -> list of (tier, slot) across every tier
-    for tier in TIERS:
-        for s, slist in slots_by_tier[tier].items():
-            for sl in slist:
-                all_slots.setdefault(s, []).append((tier, sl))
+    # store: remaining requirement + outcome per (store, sku)
+    store_state = (lines.groupBy("store_id", "sku")
+                   .agg(F.coalesce(F.max("ds_requirement"), F.lit(0.0)).alias("balance_req"))
+                   .withColumn("done", F.lit(0))
+                   .withColumn("final_mh_id", F.lit(None).cast("string"))
+                   .withColumn("final_bucket", F.lit(None).cast("string"))
+                   .withColumn("final_tier", F.lit(None).cast("int"))
+                   .withColumn("final_round", F.lit(None).cast("int"))
+                   .withColumn("allocated_qty", F.lit(0.0))
+                   .localCheckpoint())
 
-    leftover = [s for s in requirement if s not in assigned and remaining[s] > 0]
-    leftover.sort(key=lambda s: (-remaining[s], s))               # largest requirement first
-    for s in leftover:
-        opts = [(t, sl) for (t, sl) in all_slots.get(s, [])
-                if pools.get((sl["mh"], sl["bucket"]), 0) > 0]
-        if not opts:
-            continue                                              # nothing left anywhere -> exhausted
-        opts.sort(key=lambda ts: (ts[0], ts[1]["lh_rank"], -pools[(ts[1]["mh"], ts[1]["bucket"])]))
-        tier, sl = opts[0]
-        take = min(remaining[s], pools[(sl["mh"], sl["bucket"])])
-        pools[(sl["mh"], sl["bucket"])] -= take
-        remaining[s] -= take
-        assigned[s] = dict(sl, tier=tier, alloc=take)
+    # used lines accumulator (starts empty)
+    used_lines = (eligible_lines.select("store_id", "sku", "mh_id", "inv_bucket")
+                  .limit(0)
+                  .withColumn("allocation_round", F.lit(0).cast("int"))
+                  .localCheckpoint())
 
-    # ---- Emit one record per store that had candidate edges for this sku. --------------
-    out = []
-    for s, req in requirement.items():
-        a = assigned.get(s)
-        out.append(dict(
-            store_id=s,
-            product_variant_id=sku,
-            final_mh_id=a["mh"] if a else None,
-            final_mh_source=a["mh_source"] if a else None,
-            final_mh_pref_rank=a["lh_rank"] if a else None,
-            final_mh_type=a["mh_type"] if a else None,
-            final_expiry_bucket=a["bucket"] if a else None,
-            final_priority_tier=a["tier"] if a else None,
-            final_mh_inventory_qty=pool_init[(a["mh"], a["bucket"])] if a else None,
-            allocated_qty=float(a["alloc"]) if a else 0.0,
-            unmet_qty=float(req - (a["alloc"] if a else 0.0)),
-        ))
-    return out
+    pick_w = Window.partitionBy("store_id", "sku").orderBy(F.col("inv_balance").desc(), F.col("mh_id"))
+    cum_w = (Window.partitionBy("mh_id", "sku", "inv_bucket")
+             .orderBy(F.col("balance_req").desc(), F.col("store_id"))
+             .rowsBetween(Window.unboundedPreceding, Window.currentRow))
+
+    rnd = 0
+    for tier_no, dead_val, bucket in TIERS:
+        tier_lines = eligible_lines.filter(
+            (F.col("dead_mh") == dead_val) & (F.col("inv_bucket") == bucket))
+
+        while rnd < MAX_ROUNDS:
+            # ---- working set: tier lines still open & unused, with live inventory -----
+            work = (tier_lines
+                    .join(pool_state.filter(F.col("inv_balance") > 0),
+                          ["mh_id", "sku", "inv_bucket"])
+                    .join(store_state.filter((F.col("done") == 0) & (F.col("balance_req") > 0))
+                                     .select("store_id", "sku", "balance_req"),
+                          ["store_id", "sku"])
+                    .join(used_lines.select("store_id", "sku", "mh_id", "inv_bucket"),
+                          ["store_id", "sku", "mh_id", "inv_bucket"], "left_anti"))
+
+            # one MH per store x sku = the highest-inventory candidate
+            cand = work.withColumn("rn", F.row_number().over(pick_w)).filter(F.col("rn") == 1).drop("rn")
+
+            # cumsum gate (largest requirement first), all-or-nothing
+            gated = (cand
+                     .withColumn("cum_req", F.sum("balance_req").over(cum_w))
+                     .withColumn("allocated_qty",
+                                 F.when(F.col("cum_req") <= F.col("inv_balance"), F.col("balance_req"))
+                                  .otherwise(F.lit(0.0)))
+                     .select("store_id", "sku", "mh_id", "inv_bucket", "balance_req",
+                             "inv_balance", "allocated_qty")
+                     .localCheckpoint())
+
+            if gated.count() == 0:
+                break                                   # tier exhausted -> next tier
+
+            rnd += 1
+
+            # ---- update pool: subtract what was allocated from each (mh, sku, bucket) -
+            pool_delta = gated.groupBy("mh_id", "sku", "inv_bucket").agg(
+                F.sum("allocated_qty").alias("alloc_sum"))
+            pool_state = (pool_state.join(pool_delta, ["mh_id", "sku", "inv_bucket"], "left")
+                          .withColumn("inv_balance",
+                                      F.col("inv_balance") - F.coalesce("alloc_sum", F.lit(0.0)))
+                          .drop("alloc_sum")
+                          .localCheckpoint())
+
+            # ---- update store: close fully-allocated stores --------------------------
+            winners = (gated.filter(F.col("allocated_qty") > 0)
+                       .select("store_id", "sku",
+                               F.col("mh_id").alias("w_mh"),
+                               F.col("inv_bucket").alias("w_bucket"),
+                               F.col("allocated_qty").alias("w_alloc")))
+            store_state = (store_state.join(winners, ["store_id", "sku"], "left")
+                           .withColumn("done", F.when(F.col("w_mh").isNotNull(), F.lit(1)).otherwise(F.col("done")))
+                           .withColumn("final_mh_id", F.coalesce("final_mh_id", "w_mh"))
+                           .withColumn("final_bucket", F.coalesce("final_bucket", "w_bucket"))
+                           .withColumn("final_tier",
+                                       F.when(F.col("w_mh").isNotNull() & F.col("final_tier").isNull(),
+                                              F.lit(tier_no)).otherwise(F.col("final_tier")))
+                           .withColumn("final_round",
+                                       F.when(F.col("w_mh").isNotNull() & F.col("final_round").isNull(),
+                                              F.lit(rnd)).otherwise(F.col("final_round")))
+                           .withColumn("allocated_qty",
+                                       F.when(F.col("w_mh").isNotNull(), F.col("w_alloc"))
+                                        .otherwise(F.col("allocated_qty")))
+                           .withColumn("balance_req",
+                                       F.when(F.col("w_mh").isNotNull(), F.lit(0.0))
+                                        .otherwise(F.col("balance_req")))
+                           .drop("w_mh", "w_bucket", "w_alloc")
+                           .localCheckpoint())
+
+            # ---- mark every tested line as used (allocated or not) -------------------
+            used_new = (gated.select("store_id", "sku", "mh_id", "inv_bucket")
+                        .withColumn("allocation_round", F.lit(rnd)))
+            used_lines = used_lines.unionByName(used_new).localCheckpoint()
+
+    # ===================================================================================
+    # Assemble outputs
+    # ===================================================================================
+    eligible_flag = ((F.col("frequency") == 1) & po_ok).cast("int")
+
+    winners_final = store_state.filter(F.col("final_mh_id").isNotNull()).select(
+        "store_id", "sku",
+        F.col("final_mh_id"), F.col("final_bucket"), F.col("allocated_qty").alias("line_alloc"))
+
+    total_by_pool = (winners_final.groupBy("final_mh_id", "sku", "final_bucket")
+                     .agg(F.sum("line_alloc").alias("total_allocated")))
+
+    # ---- line-level output (all input lines kept) ------------------------------------
+    line_out = (lines
+                .withColumn("eligible", eligible_flag)
+                .join(used_lines, ["store_id", "sku", "mh_id", "inv_bucket"], "left")
+                .join(winners_final.select(
+                        F.col("store_id"), F.col("sku"),
+                        F.col("final_mh_id").alias("mh_id"),
+                        F.col("final_bucket").alias("inv_bucket"),
+                        F.col("line_alloc").alias("allocated_qty")),
+                      ["store_id", "sku", "mh_id", "inv_bucket"], "left")
+                .join(total_by_pool.select(
+                        F.col("final_mh_id").alias("mh_id"), F.col("sku"),
+                        F.col("final_bucket").alias("inv_bucket"), "total_allocated"),
+                      ["mh_id", "sku", "inv_bucket"], "left")
+                .join(pool_state.select("mh_id", "sku", "inv_bucket",
+                                        F.col("inv_balance").alias("inv_remaining")),
+                      ["mh_id", "sku", "inv_bucket"], "left")
+                .withColumn("allocated_qty", F.coalesce("allocated_qty", F.lit(0.0)))
+                .withColumn("total_allocated", F.coalesce("total_allocated", F.lit(0.0)))
+                .withColumn("run_date", F.lit(date.today()))
+                .select("store_id", "sku", "mh_id", "inv_bucket", "dead_mh", "frequency",
+                        "po_base_validation_status", "ds_requirement", "final_ros", "inv",
+                        "eligible", "allocation_round", "allocated_qty", "total_allocated",
+                        "inv_remaining", "run_date"))
+
+    # ---- store x sku helper info for reasons -----------------------------------------
+    cand_info = (lines.filter((F.col("frequency") == 1) & po_ok & (F.col("inv") > 0))
+                 .groupBy("store_id", "sku")
+                 .agg(F.countDistinct("mh_id").alias("n_candidate_mhs")))
+    open_info = (lines.groupBy("store_id", "sku")
+                 .agg(F.max(F.when(F.lower("po_base_validation_status") == "open", 1).otherwise(0))
+                       .alias("has_open")))
+
+    # ---- store x sku final output ----------------------------------------------------
+    final_out = (store_state
+                 .join(lines.groupBy("store_id", "sku")
+                            .agg(F.coalesce(F.max("ds_requirement"), F.lit(0.0)).alias("ds_requirement")),
+                       ["store_id", "sku"], "left")
+                 .join(cand_info, ["store_id", "sku"], "left")
+                 .join(open_info, ["store_id", "sku"], "left")
+                 .withColumn("n_candidate_mhs", F.coalesce("n_candidate_mhs", F.lit(0)))
+                 .withColumn("balance_requirement",
+                             F.when(F.col("final_mh_id").isNotNull(), F.lit(0.0))
+                              .otherwise(F.coalesce("ds_requirement", F.lit(0.0))))
+                 .withColumn("reason",
+                             F.when(F.coalesce("ds_requirement", F.lit(0.0)) <= 0, "NO_REQUIREMENT")
+                              .when(F.col("final_mh_id").isNotNull(), "ALLOCATED")
+                              .when(F.col("n_candidate_mhs") > 0, "UNALLOCATED")
+                              .when(F.col("has_open") == 1, "SKIP_PO_OPEN")
+                              .otherwise("NO_CANDIDATE"))
+                 .withColumn("run_date", F.lit(date.today()))
+                 .select("store_id", "sku", "ds_requirement", "n_candidate_mhs",
+                         "final_mh_id", "final_bucket", "final_tier", "final_round",
+                         "allocated_qty", "balance_requirement", "reason", "run_date"))
+
+    return line_out, final_out
 
 
-def allocate_all(edges_pdf):
-    """Run the greedy for every sku and return a tidy pandas DataFrame (store x sku grain)."""
-    records = []
-    for sku, edges in edges_pdf.groupby("product_variant_id"):
-        records.extend(allocate_one_sku(sku, edges))
-    return pd.DataFrame.from_records(records)
-
-
-# ---------------------------------------------------------------------------------------
-# Assembly (no Spark) -- build the final store x sku RCA table from the two input frames.
-# Kept Spark-free so it can be unit-tested with dummy data (see tests/sample_check.py).
-#   edges_pdf : output shape of QUERY_EDGES
-#   base_pdf  : output shape of QUERY_BASE
-# ---------------------------------------------------------------------------------------
-def build_output(edges_pdf, base_pdf):
-    # Candidate-set summary per store x sku (RCA): how many MHs (with inventory) were in play.
-    if len(edges_pdf):
-        edges_pdf["_cand"] = (
-            edges_pdf["mh_id"].astype(str) + ":" + edges_pdf["expiry_bucket"].astype(str)
-            + ":" + edges_pdf["mh_type"].astype(str) + ":t" + edges_pdf["priority_tier"].astype(str)
-            + ":" + edges_pdf["mh_inventory_qty"].astype(str)
-        )
-        cand_summary = (
-            edges_pdf.groupby(["store_id", "product_variant_id"])
-            .agg(n_candidate_mhs=("mh_id", "nunique"),
-                 n_candidate_edges=("mh_id", "size"),
-                 candidates_considered=("_cand", lambda x: " | ".join(sorted(x))))
-            .reset_index()
-        )
-        alloc_pdf = allocate_all(edges_pdf.drop(columns="_cand"))
-    else:
-        cand_summary = pd.DataFrame(
-            columns=["store_id", "product_variant_id", "n_candidate_mhs",
-                     "n_candidate_edges", "candidates_considered"])
-        alloc_pdf = pd.DataFrame()
-
-    # Assemble the final store x sku table: base LEFT JOIN summary LEFT JOIN allocation.
-    out = base_pdf.merge(cand_summary, on=["store_id", "product_variant_id"], how="left")
-    if len(alloc_pdf):
-        out = out.merge(alloc_pdf, on=["store_id", "product_variant_id"], how="left")
-    else:
-        for col in ["final_mh_id", "final_mh_source", "final_mh_pref_rank", "final_mh_type",
-                    "final_expiry_bucket", "final_priority_tier", "final_mh_inventory_qty",
-                    "allocated_qty", "unmet_qty"]:
-            out[col] = None
-
-    out["n_candidate_mhs"] = out["n_candidate_mhs"].fillna(0).astype(int)
-    out["n_candidate_edges"] = out["n_candidate_edges"].fillna(0).astype(int)
-    out["allocated_qty"] = out["allocated_qty"].fillna(0.0)
-    out["unmet_qty"] = out["unmet_qty"].fillna(out["requirement"]).fillna(0.0)
-
-    # Human-readable RCA reason.
-    def reason(r):
-        if r["has_open_po"] == 1:
-            return "SKIP_PO_OPEN"
-        if not r["requirement"] or r["requirement"] <= 0:
-            return "NO_REQUIREMENT"
-        if r["n_candidate_mhs"] == 0:
-            return "NO_CANDIDATE_MH_WITH_INVENTORY"
-        if pd.isna(r["final_mh_id"]):
-            return "SUPPLY_EXHAUSTED_BY_OTHER_STORES"
-        if r["unmet_qty"] <= 0:
-            return "ALLOCATED"
-        return "ALLOCATED_PARTIAL_SUPPLY_CAPPED"
-
-    out["reason"] = out.apply(reason, axis=1)
-    out["run_date"] = date.today()
-
-    cols = ["store_id", "product_variant_id", "requirement",
-            "base_validation_status", "eligible", "po_row_cnt", "has_open_po", "has_closed_po",
-            "n_candidate_mhs", "n_candidate_edges", "candidates_considered",
-            "final_mh_id", "final_mh_source", "final_mh_pref_rank", "final_mh_type",
-            "final_expiry_bucket", "final_priority_tier", "final_mh_inventory_qty",
-            "allocated_qty", "unmet_qty", "reason", "run_date"]
-    return out[cols]
-
-
-# ---------------------------------------------------------------------------------------
-# Driver
-# ---------------------------------------------------------------------------------------
 def main():
-    from pyspark.sql import SparkSession  # imported lazily so the algo is usable without Spark
-
+    from pyspark.sql import SparkSession
     spark = SparkSession.builder.getOrCreate()
 
-    edges_pdf = spark.sql(QUERY_EDGES).toPandas()
-    base_pdf = spark.sql(QUERY_BASE).toPandas()
+    lines = _standardize(spark.table(INPUT_TABLE))
+    line_out, final_out = allocate(lines)
 
-    out = build_output(edges_pdf, base_pdf)
+    (line_out.write.format("delta").mode("overwrite")
+        .option("overwriteSchema", "true").saveAsTable(OUT_LINE_TABLE))
+    (final_out.write.format("delta").mode("overwrite")
+        .option("overwriteSchema", "true").saveAsTable(OUT_FINAL_TABLE))
 
-    (spark.createDataFrame(out)
-        .write.format("delta").mode("overwrite")
-        .option("overwriteSchema", "true")
-        .saveAsTable(OUTPUT_TABLE))
-
-    print(f"Wrote {len(out)} store x sku rows to {OUTPUT_TABLE}")
+    print(f"Wrote line-level -> {OUT_LINE_TABLE}, store x sku final -> {OUT_FINAL_TABLE}")
 
 
 if __name__ == "__main__":

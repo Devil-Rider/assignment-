@@ -1,78 +1,79 @@
 """
-Local check for the greedy allocation -- no Spark, no Databricks needed.
+Spark-local check for the distributed greedy -- no Databricks needed.
 
-Builds dummy `edges_pdf` / `base_pdf` (the exact shapes that QUERY_EDGES / QUERY_BASE
-return) for one sku, runs build_output(), and prints the store x sku RCA result.
+Builds a tiny in-memory network DataFrame, runs allocate(), and asserts the outcome.
+Run:  python tests/sample_check.py   (requires pyspark installed locally)
 
-Run:  python tests/sample_check.py
+Scenario (one sku 'K'), tier-1 = dead_mh & expiry_in_30days:
+  MH 'X' (dead, in_30) inv=30 is shared by S1,S2,S3 (each req 20); MH 'Y' (buying, in_30)
+  inv=100 is the fallback for S2/S3. S4's only line is frequency=0 (ineligible). S5 is PO open.
+  S6 has a candidate but needs more than any MH holds (req 999) -> UNALLOCATED.
 
-Scenario (SKU1), warehouses MH1 (dead), MH2 (buying), MH3 (dead, fallback):
-  inventory  : MH1 in_30=30, MH1 post_30=50, MH2 in_30=100, MH3 in_30=5
-  S1 req10   candidates MH1(1), MH2(2)
-  S2 req10   candidates MH1(1), MH2(2)
-  S3 req15   candidates MH1(1), MH2(2)
-  S4 req8    candidate  MH3(99, fallback)
-  S5 req5    PO 'open'  -> skipped (appears in base only)
-
-Expected:
-  S3 -> MH1 in_30 tier1 alloc15 (largest req grabs dead/in_30 first)
-  S1 -> MH1 in_30 tier1 alloc10 (MH1 now drained to 5)
-  S2 -> falls through (MH1 left=5 < 10) -> MH2 in_30 tier2 alloc10
-  S4 -> no MH can fully serve -> best-partial MH3 in_30 alloc5, unmet3
-  S5 -> SKIP_PO_OPEN, alloc0 unmet5
+Expected (largest-req-first, all-or-nothing, fall-through):
+  Round 1, tier-1: all three want X (=30). Stacked 20,40,60 -> only S1 fits (20) -> X.
+  S2,S3 get 0, are marked used on X, and FALL THROUGH.
+  Tier-2 (buying in_30): S2,S3 take Y (=100) -> Y.
+  S4 -> NO_CANDIDATE (frequency=0 filtered out).
+  S5 -> SKIP_PO_OPEN.
+  S6 -> UNALLOCATED.
 """
 
 import os
 import sys
 
-import pandas as pd
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from to_network_allocation import build_output  # noqa: E402
+
+try:
+    from pyspark.sql import SparkSession
+except ImportError:
+    print("SKIP: pyspark not installed")
+    sys.exit(0)
+
+from to_network_allocation import allocate, _standardize, BUCKET_IN30  # noqa: E402
 
 
-def edge(store, mh, rank, mh_type, bucket, inv, req, tier, source="final_sec_mh_selection"):
-    return dict(store_id=store, product_variant_id="SKU1", mh_id=mh, mh_source=source,
-                mh_pref_rank=rank, mh_type=mh_type, expiry_bucket=bucket,
-                mh_inventory_qty=inv, requirement=req, priority_tier=tier)
+def row(store, mh, dead, freq, inv, req, po="closed", bucket=BUCKET_IN30, ros=1.0):
+    return (store, "K", mh, bucket, dead, freq, float(inv), po, float(req), ros)
 
 
 def main():
-    edges = pd.DataFrame([
-        # S1, S2, S3 : MH1 (dead) in_30 & post_30, plus MH2 (buying) in_30
-        edge("S1", "MH1", 1, "dead",   "in_30",   30, 10, 1),
-        edge("S1", "MH1", 1, "dead",   "post_30", 50, 10, 3),
-        edge("S1", "MH2", 2, "buying", "in_30",  100, 10, 2),
-        edge("S2", "MH1", 1, "dead",   "in_30",   30, 10, 1),
-        edge("S2", "MH1", 1, "dead",   "post_30", 50, 10, 3),
-        edge("S2", "MH2", 2, "buying", "in_30",  100, 10, 2),
-        edge("S3", "MH1", 1, "dead",   "in_30",   30, 15, 1),
-        edge("S3", "MH1", 1, "dead",   "post_30", 50, 15, 3),
-        edge("S3", "MH2", 2, "buying", "in_30",  100, 15, 2),
-        # S4 : only the store_master_live fallback MH3 (dead) in_30 = 5
-        edge("S4", "MH3", 99, "dead", "in_30", 5, 8, 1, source="store_master_live"),
-    ])
+    spark = (SparkSession.builder.master("local[2]").appName("alloc-test")
+             .config("spark.sql.shuffle.partitions", "4").getOrCreate())
+    spark.sparkContext.setLogLevel("ERROR")
 
-    base = pd.DataFrame([
-        dict(store_id="S1", product_variant_id="SKU1", requirement=10, po_row_cnt=1,
-             has_open_po=0, has_closed_po=1, base_validation_status="CLOSED", eligible=1),
-        dict(store_id="S2", product_variant_id="SKU1", requirement=10, po_row_cnt=1,
-             has_open_po=0, has_closed_po=1, base_validation_status="CLOSED", eligible=1),
-        dict(store_id="S3", product_variant_id="SKU1", requirement=15, po_row_cnt=1,
-             has_open_po=0, has_closed_po=1, base_validation_status="CLOSED", eligible=1),
-        dict(store_id="S4", product_variant_id="SKU1", requirement=8, po_row_cnt=0,
-             has_open_po=0, has_closed_po=0, base_validation_status="NO_PO_ROW", eligible=1),
-        dict(store_id="S5", product_variant_id="SKU1", requirement=5, po_row_cnt=1,
-             has_open_po=1, has_closed_po=0, base_validation_status="OPEN", eligible=0),
-    ])
+    cols = ["store_id", "sku", "mh_id", "inv_bucket", "dead_mh", "frequency",
+            "inv", "po_base_validation_status", "ds_requirement", "final_ros"]
+    data = [
+        row("S1", "X", 1, 1, 30, 20),
+        row("S2", "X", 1, 1, 30, 20), row("S2", "Y", 0, 1, 100, 20),
+        row("S3", "X", 1, 1, 30, 20), row("S3", "Y", 0, 1, 100, 20),
+        row("S4", "X", 1, 0, 30, 20),                       # frequency=0 -> ineligible
+        row("S5", "X", 1, 1, 30, 20, po="open"),            # PO open -> skip
+        row("S6", "Z", 1, 1, 5, 999),                       # needs more than any MH -> unallocated
+    ]
+    lines = _standardize(spark.createDataFrame(data, cols))
 
-    out = build_output(edges, base)
-    show = ["store_id", "requirement", "base_validation_status", "final_mh_id",
-            "final_mh_type", "final_expiry_bucket", "final_priority_tier",
-            "allocated_qty", "unmet_qty", "reason"]
-    pd.set_option("display.width", 200)
-    pd.set_option("display.max_columns", None)
-    print(out[show].to_string(index=False))
+    _, final_out = allocate(lines)
+    res = {r["store_id"]: r for r in final_out.collect()}
+
+    def check(store, reason, mh=None):
+        r = res[store]
+        ok = r["reason"] == reason and (mh is None or r["final_mh_id"] == mh)
+        print(f"  {store}: reason={r['reason']:<12} final_mh={r['final_mh_id']} "
+              f"alloc={r['allocated_qty']} bal={r['balance_requirement']}  "
+              f"{'OK' if ok else 'FAIL <<<'}")
+        assert ok, f"{store}: expected {reason}/{mh}, got {r['reason']}/{r['final_mh_id']}"
+
+    print("results:")
+    check("S1", "ALLOCATED", "X")
+    check("S2", "ALLOCATED", "Y")
+    check("S3", "ALLOCATED", "Y")
+    check("S4", "NO_CANDIDATE")
+    check("S5", "SKIP_PO_OPEN")
+    check("S6", "UNALLOCATED")
+    print("ALL ASSERTIONS PASSED")
+
+    spark.stop()
 
 
 if __name__ == "__main__":
