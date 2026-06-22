@@ -40,7 +40,6 @@ if the edge set is very large, batch the sku groups (see allocate_all).
 from datetime import date
 
 import pandas as pd
-from pyspark.sql import SparkSession
 
 
 # ---------------------------------------------------------------------------------------
@@ -282,14 +281,12 @@ def allocate_all(edges_pdf):
 
 
 # ---------------------------------------------------------------------------------------
-# Driver
+# Assembly (no Spark) -- build the final store x sku RCA table from the two input frames.
+# Kept Spark-free so it can be unit-tested with dummy data (see tests/sample_check.py).
+#   edges_pdf : output shape of QUERY_EDGES
+#   base_pdf  : output shape of QUERY_BASE
 # ---------------------------------------------------------------------------------------
-def main():
-    spark = SparkSession.builder.getOrCreate()
-
-    edges_pdf = spark.sql(QUERY_EDGES).toPandas()
-    base_pdf = spark.sql(QUERY_BASE).toPandas()
-
+def build_output(edges_pdf, base_pdf):
     # Candidate-set summary per store x sku (RCA): how many MHs (with inventory) were in play.
     if len(edges_pdf):
         edges_pdf["_cand"] = (
@@ -349,7 +346,21 @@ def main():
             "final_mh_id", "final_mh_source", "final_mh_pref_rank", "final_mh_type",
             "final_expiry_bucket", "final_priority_tier", "final_mh_inventory_qty",
             "allocated_qty", "unmet_qty", "reason", "run_date"]
-    out = out[cols]
+    return out[cols]
+
+
+# ---------------------------------------------------------------------------------------
+# Driver
+# ---------------------------------------------------------------------------------------
+def main():
+    from pyspark.sql import SparkSession  # imported lazily so the algo is usable without Spark
+
+    spark = SparkSession.builder.getOrCreate()
+
+    edges_pdf = spark.sql(QUERY_EDGES).toPandas()
+    base_pdf = spark.sql(QUERY_BASE).toPandas()
+
+    out = build_output(edges_pdf, base_pdf)
 
     (spark.createDataFrame(out)
         .write.format("delta").mode("overwrite")
