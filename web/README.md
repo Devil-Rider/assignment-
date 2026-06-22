@@ -46,8 +46,23 @@ the browser can fetch sql.js / CodeMirror from their CDNs.)
 
 ## 🌐 Deploy (free options)
 
-- **GitHub Pages**: push and enable Pages on the `/web` folder (or move files to root).
-- **Netlify / Vercel / Cloudflare Pages**: point them at the `web/` directory, no build step.
+### GitHub Pages — automated (recommended)
+A workflow at `.github/workflows/deploy-pages.yml` validates the lessons and
+publishes the `web/` folder on every push. **One-time setup:**
+
+1. In the repo, go to **Settings → Pages → Build and deployment**.
+2. Set **Source** to **GitHub Actions**.
+3. Push to `main` (or the feature branch) — the **Deploy SQLQuest to GitHub
+   Pages** action runs and prints the live URL in its summary.
+
+Live URL (project page): **https://devil-rider.github.io/assignment-/**
+
+> Note: on a project page the site is served under `/assignment-/`. All asset
+> paths are relative, so it works. For AdSense, `ads.txt` must sit at the domain
+> *root*, so use a custom domain or a user/org Pages site when you go live with ads.
+
+### Netlify / Vercel / Cloudflare Pages (no build step)
+Point them at the `web/` directory — that's it.
 
 ## 💸 Monetization — how you earn
 
