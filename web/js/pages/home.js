@@ -48,6 +48,18 @@ window.Pages.home = function (view) {
       <div class="feature"><div class="ico">💸</div><h3>Free to use</h3><p>The editor and the full course are free. Ads keep the lights on so learning stays open to all.</p></div>
     </div>
 
+    ${topPlayersSection()}
+
+    <div class="newsletter-cta">
+      <h2 style="margin:0">📩 Join the newsletter</h2>
+      <p class="muted" style="margin:.4rem 0 0">New lessons, SQL tips and updates — straight to your inbox. No spam.</p>
+      <form id="homeNews" class="newsletter-row">
+        <input type="email" id="homeNewsEmail" placeholder="you@example.com" />
+        <button class="btn btn-primary" type="submit">Subscribe</button>
+      </form>
+      <div class="form-err small" id="homeNewsMsg" style="text-align:center"></div>
+    </div>
+
     <div class="panel" style="padding:2rem;margin-top:1.5rem;text-align:center">
       <h2 style="margin-top:0">Ready to write your first query?</h2>
       <p class="muted">Jump straight into the editor, or take the guided path through the course.</p>
@@ -57,4 +69,34 @@ window.Pages.home = function (view) {
       </div>
     </div>
   `;
+
+  // Wire the home newsletter form
+  const news = view.querySelector('#homeNews');
+  if (news) news.onsubmit = async (e) => {
+    e.preventDefault();
+    const msg = view.querySelector('#homeNewsMsg');
+    const res = await window.Newsletter.subscribe(view.querySelector('#homeNewsEmail').value, '', 'home');
+    if (!res.ok) { msg.style.color = 'var(--red)'; msg.textContent = res.error; return; }
+    msg.style.color = 'var(--green)';
+    msg.textContent = res.warning || '✓ Subscribed — thank you!';
+    view.querySelector('#homeNewsEmail').value = '';
+  };
 };
+
+// "Top Players" highlight list for the home page.
+function topPlayersSection() {
+  const players = (window.Auth.listPlayers ? window.Auth.listPlayers() : []).slice(0, 5);
+  const esc = window.Components.escapeHtml;
+  const medal = (i) => (i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `#${i + 1}`);
+  const rows = players.length
+    ? players.map((p, i) => `<div class="tp-row"><span class="tp-rank">${medal(i)}</span>
+        <span class="tp-name">${esc(p.name)} ${p.isMe ? '<span class="chip" style="color:var(--accent)">you</span>' : ''}</span>
+        <span class="muted small">Lv ${p.level}</span><span class="tp-xp">⭐ ${p.xp}</span></div>`).join('')
+    : `<div class="tp-row muted">No players yet — <a href="#/login?mode=signup" style="margin-left:.3rem">be the first!</a></div>`;
+  return `
+    <div class="row-between" style="margin:2rem 0 .75rem">
+      <h2 class="section-title" style="margin:0">🏆 Top Players</h2>
+      <a class="btn btn-sm" href="#/leaderboard">Full leaderboard →</a>
+    </div>
+    <div class="top-players">${rows}</div>`;
+}

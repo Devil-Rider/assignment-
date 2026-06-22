@@ -11,10 +11,45 @@ deploy it as static files anywhere and monetize it with ads.
 |------|--------------|-----------------|
 | **SQL Editor** (`#/editor`) | Write and run real SQL against a sample shop database, right in the browser. Schema sidebar, Run (Ctrl/⌘+Enter), reset DB. | ❌ Open to everyone |
 | **Learn** (`#/learn`) | A gamified course from beginner → advanced. 6 "worlds", 25 auto-graded challenges, XP, levels, badges, and locked/unlocked progression. | ✅ Yes |
-| **Leaderboard** (`#/leaderboard`) | Ranks all players by XP, level, lessons completed & badges. | ❌ |
+| **Leaderboard** (`#/leaderboard`) | Ranks all players by XP, level, lessons completed & badges. Top 5 also featured on the home page. | ❌ |
+| **Community** (`#/community`) | Discussion board. Real cross-user discussion via Giscus when configured; local demo board otherwise. | ❌ (post: ✅) |
 | **Contact** (`#/contact`) | Contact-us page with details and a message form. | ❌ |
-| **Login / Sign up** (`#/login`) | Client-side accounts that store your XP & progress. | — |
+| **Login / Sign up** (`#/login`) | Client-side accounts with newsletter opt-in (auto-subscribe). | — |
+| **Admin** (`#/admin`) | Admin-only panel: ban/unban/delete users, view & export newsletter list, IP blocklist. | 🛡️ Admin |
+| **Newsletter** | Email capture on signup + footer/home forms, sent to Formspree, with local backup. | — |
 | **Ads** | Dedicated, AdSense-ready ad slots throughout the site. **This is the revenue source.** | — |
+
+### 🔧 Everything configurable lives in `js/config.js`
+
+```js
+site:       { name, accent, logo, tagline }   // rename the whole site in ONE place
+newsletter: { enabled, formspreeEndpoint }    // paste your Formspree form URL
+community:  { enabled, repo, repoId, ... }     // Giscus / GitHub Discussions
+admin:      { email, password, name }          // CHANGE the password before going live
+```
+
+**Rename the site:** change `site.name` (and optionally `site.accent`, the
+highlighted trailing part of the logo). The navbar, footer and page title all
+update automatically.
+
+**Collect newsletter emails for real:** create a free form at
+[formspree.io](https://formspree.io), paste the endpoint into
+`newsletter.formspreeEndpoint`. New signups (and footer/home subscribers) are
+POSTed there **and** kept locally so the admin panel can list/export them as CSV.
+
+**Real community discussion:** enable GitHub Discussions on your repo, set up
+[giscus.app](https://giscus.app), fill in `community.*` and set `enabled: true`.
+
+**Admin login:** an admin account is auto-created from `config.admin` on first
+load (default `admin@sqlquest.app` / `admin123` — **change it!**). Logging in as
+admin reveals the 🛡️ Admin panel.
+
+> ⚠️ **Honest limits of a static site:** user bans and the IP blocklist in the
+> admin panel are enforced **client-side**, so they only affect this browser /
+> this visitor and are bypassable. For real, server-enforced blocking you need a
+> backend or a CDN/WAF such as Cloudflare. The admin UI is ready to feed such a
+> backend — the app talks only to `Auth.*` and `Newsletter.*`, so swapping in a
+> real API is a contained change.
 
 **Extras:** 🌙/☀️ **dark/light theme toggle** (remembers your choice) and a
 🔗 **Share** button in the editor that copies a link which reopens your exact

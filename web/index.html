@@ -41,6 +41,7 @@
       <a href="#/editor" data-route="editor">SQL Editor</a>
       <a href="#/learn" data-route="learn">Learn</a>
       <a href="#/leaderboard" data-route="leaderboard">Leaderboard</a>
+      <a href="#/community" data-route="community">Community</a>
       <a href="#/contact" data-route="contact">Contact</a>
     </nav>
 
@@ -72,9 +73,18 @@
       <div class="footer-links">
         <a href="#/editor">SQL Editor</a>
         <a href="#/learn">Learn</a>
+        <a href="#/community">Community</a>
         <a href="#/contact">Contact</a>
       </div>
-      <div class="muted small">© <span id="year"></span> SQLQuest. All rights reserved.</div>
+      <form class="newsletter-form" id="footerNews">
+        <label class="muted small" style="display:block;margin-bottom:.4rem">📩 Get new lessons & tips by email</label>
+        <div class="newsletter-row">
+          <input type="email" id="footerNewsEmail" placeholder="you@example.com" />
+          <button class="btn btn-primary btn-sm" type="submit">Subscribe</button>
+        </div>
+        <div class="form-err small" id="footerNewsMsg"></div>
+      </form>
+      <div class="muted small">© <span id="year"></span> <span class="footer-brand">SQLQuest</span>. All rights reserved.</div>
     </div>
   </footer>
 
@@ -86,8 +96,10 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/sql/sql.min.js"></script>
 
   <!-- App scripts -->
+  <script src="js/config.js"></script>
   <script src="js/ads.js"></script>
   <script src="js/sql-engine.js"></script>
+  <script src="js/newsletter.js"></script>
   <script src="js/auth.js"></script>
   <script src="js/course-data.js"></script>
   <script src="js/components.js"></script>
@@ -95,8 +107,10 @@
   <script src="js/pages/editor.js"></script>
   <script src="js/pages/learn.js"></script>
   <script src="js/pages/leaderboard.js"></script>
+  <script src="js/pages/community.js"></script>
   <script src="js/pages/contact.js"></script>
   <script src="js/pages/login.js"></script>
+  <script src="js/pages/admin.js"></script>
   <script src="js/router.js"></script>
   <script src="js/app.js"></script>
 </body>

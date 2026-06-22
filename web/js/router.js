@@ -10,8 +10,10 @@ window.Router = (function () {
     editor: (params) => window.Pages.editor(view(), params),
     learn: (params) => window.Pages.learn(view(), params),
     leaderboard: (params) => window.Pages.leaderboard(view(), params),
+    community: (params) => window.Pages.community(view(), params),
     contact: (params) => window.Pages.contact(view(), params),
     login: (params) => window.Pages.login(view(), params),
+    admin: (params) => window.Pages.admin(view(), params),
   };
 
   function parse() {

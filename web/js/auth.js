@@ -34,10 +34,47 @@ window.Auth = (function () {
     if (!email) return null;
     const u = getUsers()[email];
     if (!u) return null;
-    return { email, name: u.name, xp: u.xp || 0, completed: u.completed || {}, badges: u.badges || [] };
+    return {
+      email, name: u.name, xp: u.xp || 0, completed: u.completed || {}, badges: u.badges || [],
+      isAdmin: !!u.isAdmin, banned: !!u.banned, newsletter: !!u.newsletter,
+    };
   }
 
   function isLoggedIn() { return !!currentUser(); }
+
+  function isAdmin() { const u = currentUser(); return !!(u && u.isAdmin); }
+
+  // Create the admin account (from CONFIG) once, so an admin can log in.
+  function ensureAdmin() {
+    const cfg = window.CONFIG && window.CONFIG.admin;
+    if (!cfg || !cfg.email) return;
+    const email = cfg.email.trim().toLowerCase();
+    const users = getUsers();
+    if (!users[email]) {
+      users[email] = { name: cfg.name || 'Admin', pw: obfuscate(cfg.password || 'admin'), xp: 0, completed: {}, badges: [], isAdmin: true };
+      save(USERS_KEY, users);
+    } else if (!users[email].isAdmin) {
+      users[email].isAdmin = true; save(USERS_KEY, users);
+    }
+  }
+
+  // ---- Admin controls (client-side; see README for real enforcement) ----
+  function getAllUsers() {
+    const users = getUsers();
+    return Object.keys(users).map((email) => ({
+      email, name: users[email].name, xp: users[email].xp || 0,
+      isAdmin: !!users[email].isAdmin, banned: !!users[email].banned,
+      newsletter: !!users[email].newsletter,
+    }));
+  }
+  function setBanned(email, banned) {
+    const users = getUsers(); if (!users[email] || users[email].isAdmin) return false;
+    users[email].banned = !!banned; save(USERS_KEY, users); return true;
+  }
+  function deleteUser(email) {
+    const users = getUsers(); if (!users[email] || users[email].isAdmin) return false;
+    delete users[email]; save(USERS_KEY, users); return true;
+  }
 
   // All accounts on this device, ranked for the leaderboard.
   function listPlayers() {
@@ -53,20 +90,25 @@ window.Auth = (function () {
         lessons,
         level: levelInfo(u.xp || 0).level,
         isMe: email === me,
+        isAdmin: !!u.isAdmin,
       };
-    }).sort((a, b) => b.xp - a.xp || b.lessons - a.lessons || a.name.localeCompare(b.name));
+    }).filter((p) => !p.isAdmin)   // keep the admin out of the public leaderboard
+      .sort((a, b) => b.xp - a.xp || b.lessons - a.lessons || a.name.localeCompare(b.name));
   }
 
-  function signup(name, email, password) {
+  function signup(name, email, password, newsletter) {
     email = (email || '').trim().toLowerCase();
     if (!name || !name.trim()) return { ok: false, error: 'Please enter your name.' };
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return { ok: false, error: 'Please enter a valid email.' };
     if ((password || '').length < 4) return { ok: false, error: 'Password must be at least 4 characters.' };
     const users = getUsers();
     if (users[email]) return { ok: false, error: 'An account with this email already exists.' };
-    users[email] = { name: name.trim(), pw: obfuscate(password), xp: 0, completed: {}, badges: [] };
+    const sub = newsletter !== false; // auto-subscribe by default
+    users[email] = { name: name.trim(), pw: obfuscate(password), xp: 0, completed: {}, badges: [], newsletter: sub };
     save(USERS_KEY, users);
     save(SESSION_KEY, email);
+    // Collect the email for the newsletter
+    if (sub && window.Newsletter) window.Newsletter.subscribe(email, name.trim(), 'signup');
     return { ok: true };
   }
 
@@ -75,6 +117,7 @@ window.Auth = (function () {
     const users = getUsers();
     const u = users[email];
     if (!u || u.pw !== obfuscate(password)) return { ok: false, error: 'Invalid email or password.' };
+    if (u.banned) return { ok: false, error: 'This account has been suspended. Contact support.' };
     save(SESSION_KEY, email);
     return { ok: true };
   }
@@ -123,7 +166,7 @@ window.Auth = (function () {
       const { level } = levelInfo(u.xp);
       const initials = u.name.split(/\s+/).map(s => s[0]).join('').slice(0, 2).toUpperCase();
       el.innerHTML = `
-        <span class="xp-pill" title="Experience points">⭐ ${u.xp} XP · Lv ${level}</span>
+        ${u.isAdmin ? '<a class="btn btn-sm btn-ghost" href="#/admin" title="Admin panel">🛡️ Admin</a>' : `<span class="xp-pill" title="Experience points">⭐ ${u.xp} XP · Lv ${level}</span>`}
         <span class="user-chip">
           <span class="avatar">${initials}</span>
           <span class="small">${u.name.split(/\s+/)[0]}</span>
@@ -143,6 +186,7 @@ window.Auth = (function () {
 
   return {
     signup, login, logout, currentUser, isLoggedIn,
-    markLessonComplete, awardBadge, levelInfo, renderNav,
+    markLessonComplete, awardBadge, levelInfo, renderNav, listPlayers,
+    isAdmin, ensureAdmin, getAllUsers, setBanned, deleteUser,
   };
 })();

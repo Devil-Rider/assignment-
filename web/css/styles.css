@@ -203,6 +203,21 @@ textarea.ta { width: 100%; min-height: 120px; padding: .65rem .8rem; border-radi
 .chip { font-size: .72rem; background: var(--panel-2); border: 1px solid var(--border); padding: .2rem .55rem; border-radius: 999px; color: var(--muted); }
 .hidden { display: none !important; }
 
+/* ---------- Newsletter ---------- */
+.newsletter-form { min-width: 240px; }
+.newsletter-row { display: flex; gap: .5rem; }
+.newsletter-row input { flex: 1; padding: .55rem .7rem; border-radius: 10px; border: 1px solid var(--border); background: var(--bg-soft); color: var(--text); font-family: inherit; font-size: .9rem; }
+.newsletter-row input:focus { outline: none; border-color: var(--accent); }
+.newsletter-cta { background: linear-gradient(135deg, rgba(109,139,255,.12), rgba(157,123,255,.12)); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem; text-align: center; margin-top: 1.5rem; }
+.newsletter-cta .newsletter-row { max-width: 420px; margin: .75rem auto 0; }
+
+/* ---------- Top players (home) ---------- */
+.top-players { display: grid; gap: .5rem; }
+.tp-row { display: flex; align-items: center; gap: .75rem; padding: .6rem .9rem; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
+.tp-rank { font-weight: 800; width: 2rem; }
+.tp-name { flex: 1; }
+.tp-xp { color: var(--gold); font-weight: 700; }
+
 /* ---------- Theme toggle ---------- */
 .theme-toggle { font-size: 1.05rem; line-height: 1; padding: .45rem .6rem; margin-left: auto; }
 

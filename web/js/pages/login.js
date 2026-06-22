@@ -23,6 +23,9 @@ window.Pages.login = function (view, params) {
           ${isSignup ? `<div class="field"><label>Name</label><input id="aName" type="text" placeholder="Ada Lovelace" autocomplete="name"></div>` : ''}
           <div class="field"><label>Email</label><input id="aEmail" type="email" placeholder="you@example.com" autocomplete="email"></div>
           <div class="field"><label>Password</label><input id="aPass" type="password" placeholder="••••••" autocomplete="${isSignup ? 'new-password' : 'current-password'}"></div>
+          ${isSignup ? `<label style="display:flex;gap:.5rem;align-items:flex-start;font-size:.85rem;color:var(--muted);margin-bottom:1rem;cursor:pointer">
+            <input id="aNews" type="checkbox" checked style="margin-top:.2rem">
+            <span>Subscribe me to the newsletter for new lessons, tips & updates.</span></label>` : ''}
           <div class="form-err" id="aErr"></div>
           <button class="btn btn-primary" type="submit" style="width:100%">${isSignup ? 'Sign up & start' : 'Log in'}</button>
         </form>
@@ -45,7 +48,8 @@ window.Pages.login = function (view, params) {
       let res;
       if (isSignup) {
         const name = view.querySelector('#aName').value;
-        res = window.Auth.signup(name, email, pass);
+        const news = view.querySelector('#aNews').checked;
+        res = window.Auth.signup(name, email, pass, news);
       } else {
         res = window.Auth.login(email, pass);
       }
